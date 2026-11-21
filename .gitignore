@@ -1,0 +1,17 @@
+/target
+*.log
+ctopx.toml
+
+# Ignore Sublime Text project files
+*.sublime-project
+*.sublime-workspace
+
+# Added entries (8 items)
+.env
+download/
+downloads/
+gitignore_backup/
+.pt/
+ANSWER*.md
+ANSWER*.html
+PLAN*.md

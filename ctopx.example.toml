@@ -1,0 +1,96 @@
+# ctopx configuration. Run `ctopx check` to validate it and `ctopx test-notify` to try the channels.
+# Secrets can come from the environment: write "${NAME}" and ctopx substitutes the variable's value
+# (startup fails if it is not set). Lines starting with # are never expanded.
+
+[server]
+bind = "127.0.0.1:8686"      # web UI + API + /metrics. Use 0.0.0.0:8686 only together with a token.
+# token = "${CTOPX_TOKEN}"   # bearer token for /api and /metrics (the web UI asks for it)
+allow_actions = false        # allow start/stop/restart from the web UI, API and TUI
+# name = "docker-host-1"     # shown in notification titles (default: host name)
+# public_url = "https://ctopx.example.com"   # adds an "open dashboard" link to notifications
+
+[docker]
+# host = "tcp://127.0.0.1:2375"   # overrides DOCKER_HOST; default: local socket / named pipe
+interval_secs = 2
+include = ["*"]                   # container name globs (* and ?)
+exclude = []                      # e.g. ["*-tmp", "ci-*"]
+
+[host]
+enabled = true                    # also monitor the machine itself (CPU, memory, swap, disk, load)
+
+[alerts]
+use_default_rules = true          # built-in rules, see `ctopx check`. A rule below with the same name replaces one.
+history_size = 500
+
+# ---------------------------------------------------------------- channels
+# Every channel has: name, enabled (true), min_severity ("info" | "warning" | "critical", default "warning").
+# With the default min_severity, info-level notifications (start/stop/restart/destroy) show up in the UI
+# and TUI only. Set min_severity = "info" on a channel to receive those too.
+
+# [[channels]]
+# name = "phone"
+# type = "ntfy"
+# url = "https://ntfy.sh"           # default; point to your own server if you have one
+# topic = "my-ctopx-alerts"
+# token = "${NTFY_TOKEN}"           # or username/password for basic auth
+
+# [[channels]]
+# name = "telegram"
+# type = "telegram"
+# bot_token = "${TELEGRAM_BOT_TOKEN}"
+# chat_id = "123456789"             # user, group or channel id
+# thread_id = 0                     # optional forum topic id
+
+# [[channels]]
+# name = "desktop"
+# type = "gntp"                     # Growl / Snarl / any GNTP listener
+# host = "127.0.0.1"
+# port = 23053
+# password = ""                     # optional; SHA256 key hash, body unencrypted
+
+# [[channels]]
+# name = "ops-webhook"
+# type = "webhook"
+# url = "https://example.com/hooks/ctopx"
+# format = "generic"                # "generic" | "discord" | "slack"
+# secret = "${WEBHOOK_SECRET}"      # adds X-Ctopx-Signature: sha256=<hmac of body>
+# headers = { Authorization = "Bearer abc" }
+
+# ---------------------------------------------------------------- rules
+# Four kinds of rules:
+#   kind = "metric"        a metric stays past a threshold for for_secs
+#   kind = "event"         Docker events: start stop die crash oom restart kill pause unpause create destroy
+#                          health_unhealthy health_healthy   ("crash" = die with non-zero exit code)
+#   kind = "restart_loop"  restarts deaths within window_secs
+#   kind = "docker_daemon" the Docker daemon is unreachable for for_secs
+#
+# Metrics: cpu_percent mem_percent mem_bytes net_rx_bps net_tx_bps blk_read_bps blk_write_bps pids
+#          host_cpu_percent host_mem_percent host_swap_percent host_disk_percent host_load1
+# Common options: severity, scope, exclude (container globs), channels (empty = all),
+#                 cooldown_secs, repeat_secs (re-notify while firing), notify_resolved (true)
+# op is ">" (default), ">=", "<" or "<=".
+
+# [[rules]]
+# name = "db-cpu"
+# kind = "metric"
+# metric = "cpu_percent"
+# threshold = 80
+# for_secs = 120
+# severity = "critical"
+# scope = ["postgres*", "mysql*"]
+# channels = ["phone", "telegram"]
+# repeat_secs = 1800
+
+# [[rules]]
+# name = "web-memory-bytes"
+# kind = "metric"
+# metric = "mem_bytes"
+# threshold = 1073741824            # 1 GiB, in bytes
+# scope = ["web-*"]
+
+# [[rules]]
+# name = "container-lifecycle"      # same name as a built-in rule: replaces it
+# kind = "event"
+# events = ["start", "stop", "destroy"]
+# severity = "warning"              # now reaches channels with the default min_severity
+# exclude = ["ci-*"]
