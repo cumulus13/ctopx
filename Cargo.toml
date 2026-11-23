@@ -1,6 +1,12 @@
 [package]
 name = "ctopx"
-version = "0.1.12"
+authors = [
+    "Hadi Cahyadi <cumulus13@gmail.com>",
+]
+repository = "https://github.com/cumulus13/ctopx"
+documentation = "https://docs.rs/ctopx"
+homepage = "https://github.com/cumulus13/ctopx"
+version = "0.1.13"
 edition = "2024"
 rust-version = "1.85"
 description = "ctop-style container monitor with alert notifications (ntfy, Telegram, GNTP, webhook), REST API and web UI"
