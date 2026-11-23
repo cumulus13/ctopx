@@ -14,6 +14,12 @@ A `ctop`-style container monitor that also **tells you when something is wrong**
   </a>
 </p>
 
+<p align="center">
+  <a href="https://raw.githubusercontent.com/cumulus13/ctopx/refs/heads/master/screenshot1.png" target="_blank">
+    <img src="https://raw.githubusercontent.com/cumulus13/ctopx/refs/heads/master/screenshot1.png" width="98%" alt="Screenshot">
+  </a>
+</p>
+
 
 It monitors Docker containers and the host machine itself (CPU, memory, swap, disk, load).
 
