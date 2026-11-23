@@ -71,7 +71,7 @@ enum Cmd {
 }
 
 fn main() {
-    let args: Vec<String> = std::end::args().collect();
+    let args: Vec<String> = std::env::args().collect();
     if args.len() == 2 && (args[1] == "-V" || args[1] == "--version") {
         let version = colorful_version!();
         version.print_and_exit();
