@@ -10,6 +10,8 @@ mod web;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use clap_version_flag::colorful_version;
+use clap_color_help::default_styles;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -19,7 +21,8 @@ const EXAMPLE_CONFIG: &str = include_str!("../ctopx.example.toml");
 #[command(
     name = "ctopx",
     version,
-    about = "ctop-style container monitor with alert notifications, REST API and web UI"
+    about = "ctop-style container monitor with alert notifications, REST API and web UI",
+    styles = default_styles()
 )]
 struct Cli {
     /// Path to ctopx.toml (default: $CTOPX_CONFIG, ./ctopx.toml, then the user config dir)
@@ -75,6 +78,11 @@ fn main() {
 }
 
 fn real_main() -> Result<()> {
+    let args: Vec<String> = std::end::args().collect();
+    if args.len() == 2 && (args[1] == "-V" || args[1] == "--version") {
+        let version = colorful_version!();
+        version.print_and_exit();
+    }
     let cli = Cli::parse();
     if let Some(Cmd::Init { path, force }) = &cli.cmd {
         if path.exists() && !force {
