@@ -9,8 +9,8 @@ A `ctop`-style container monitor that also **tells you when something is wrong**
 - a modern web UI (dark and light theme) embedded in the binary: no Node, no CDN, works offline
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/cumulus13/refs/heads/master/screenshot.png" target="_blank">
-    <img src="https://raw.githubusercontent.com/cumulus13/refs/heads/master/screenshot.png" width="98%" alt="Screenshot">
+  <a href="https://raw.githubusercontent.com/cumulus13/ctopx/refs/heads/master/screenshot.png" target="_blank">
+    <img src="https://raw.githubusercontent.com/cumulus13/ctopx/refs/heads/master/screenshot.png" width="98%" alt="Screenshot">
   </a>
 </p>
 
