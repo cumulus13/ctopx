@@ -20,7 +20,16 @@ It monitors Docker containers and the host machine itself (CPU, memory, swap, di
 ## Quick start
 
 ```sh
+cargo install ctopx
+```
+
+or 
+
+```sh
 cargo build --release          # produces target/release/ctopx (ctopx.exe on Windows)
+```
+
+```sh
 ctopx init                     # writes ./ctopx.toml with every option documented
 ctopx check                    # validates the config and lists the rules in effect
 ctopx test-notify              # sends a test message to every channel
@@ -29,6 +38,8 @@ ctopx serve                    # headless: collector + alerts + API + web UI on 
 ctopx tui --serve              # terminal UI and web UI together
 ctopx serve --allow-actions    # let the web UI and API start/stop/restart/pause/kill/remove containers
 ```
+
+Or you may download a prebuilt binary from the [Releases](https://github.com/cumulus13/ctopx/releases) page
 
 Without a config file ctopx runs with built-in rules and no channels: alerts show up in the UIs only.
 Config lookup order: `--config`, `$CTOPX_CONFIG`, `./ctopx.toml`, then `%APPDATA%\ctopx\ctopx.toml` (Windows) or `~/.config/ctopx/ctopx.toml`.
