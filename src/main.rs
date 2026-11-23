@@ -10,8 +10,8 @@ mod web;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use clap_version_flag::colorful_version;
 use clap_color_help::default_styles;
+use clap_version_flag::colorful_version;
 use std::path::PathBuf;
 use std::sync::Arc;
 
