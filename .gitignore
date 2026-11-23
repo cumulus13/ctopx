@@ -15,3 +15,23 @@ gitignore_backup/
 ANSWER*.md
 ANSWER*.html
 PLAN*.md
+
+# Added entries (9 items)
+gitignore_backups/
+src/tmp*
+tmp*
+PLAN.md
+CLAUDE.md
+ERROR*
+ANSWER*
+__pycache__/
+*egg-info*/
+
+# Added entries (1 items)
+BUGS*
+
+# Added entries (1 items)
+*.bak
+
+# Added entries (1 items)
+downloads1/

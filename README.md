@@ -8,6 +8,13 @@ A `ctop`-style container monitor that also **tells you when something is wrong**
 - a REST API, a live Server-Sent-Events stream and a Prometheus `/metrics` endpoint
 - a modern web UI (dark and light theme) embedded in the binary: no Node, no CDN, works offline
 
+<p align="center">
+  <a href="https://raw.githubusercontent.com/cumulus13/refs/heads/master/screenshot.png" target="_blank">
+    <img src="https://raw.githubusercontent.com/cumulus13/refs/heads/master/screenshot.png" width="98%" alt="Screenshot">
+  </a>
+</p>
+
+
 It monitors Docker containers and the host machine itself (CPU, memory, swap, disk, load).
 
 ## Quick start
