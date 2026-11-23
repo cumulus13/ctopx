@@ -12,6 +12,7 @@ const S = {
   filter: 'all',
   q: '',
   sort: 'name',
+  dir: 'asc',
   alertHist: [],
   silences: [],
   events: [],
@@ -205,26 +206,34 @@ function buildPage() {
         <div class="seg" role="group" aria-label="Show">
           ${[['all', 'All'], ['running', 'Running'], ['stopped', 'Stopped'], ['problem', 'Needs attention']].map(([k, l]) => `<button type="button" data-f="${k}" aria-pressed="${S.filter === k}">${l}</button>`).join('')}
         </div>
-        <label>Sort by
-          <select id="sort">${[['name', 'Name'], ['cpu', 'CPU'], ['mem', 'Memory'], ['net', 'Network']].map(([k, l]) => `<option value="${k}" ${S.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
-        </label>
       </div>
       <div class="tablewrap">
-        <table class="ctable"><thead><tr><th>Container</th><th>CPU</th><th>Memory</th><th class="col-net">Network</th><th class="col-status">Status</th></tr></thead><tbody id="rows"></tbody></table>
+        <table class="ctable"><thead><tr id="thead">
+          ${[['name', 'Container', ''], ['cpu', 'CPU', ''], ['mem', 'Memory (used / total)', ''], ['net', 'Network', 'col-net'], ['state', 'Status', 'col-status']].map(([k, l, c]) => `<th class="${c}" data-col="${k}"><button type="button" class="th-sort" data-sort="${k}">${l}<span class="arrow" aria-hidden="true"></span></button></th>`).join('')}
+          <th class="col-actions" id="th-actions" hidden>Actions</th>
+        </tr></thead><tbody id="rows"></tbody></table>
       </div>`;
     $('#q').addEventListener('input', (e) => { S.q = e.target.value; renderRows(); });
-    $('#sort').addEventListener('change', (e) => { S.sort = e.target.value; renderRows(); });
+    $('#thead').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-sort]');
+      if (!b) return;
+      if (S.sort === b.dataset.sort) S.dir = S.dir === 'asc' ? 'desc' : 'asc';
+      else { S.sort = b.dataset.sort; S.dir = (S.sort === 'name' || S.sort === 'state') ? 'asc' : 'desc'; }
+      renderRows();
+    });
     m.querySelectorAll('[data-f]').forEach((b) => b.addEventListener('click', () => {
       S.filter = b.dataset.f;
       m.querySelectorAll('[data-f]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
       renderRows();
     }));
     $('#rows').addEventListener('click', (e) => {
+      const act = e.target.closest('[data-act]');
+      if (act) { e.stopPropagation(); runAction(act.dataset.name, act.dataset.act, act); return; }
       const tr = e.target.closest('tr[data-name]');
       if (tr) location.hash = '#/containers/' + encodeURIComponent(tr.dataset.name);
     });
     $('#rows').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { const tr = e.target.closest('tr[data-name]'); if (tr) location.hash = '#/containers/' + encodeURIComponent(tr.dataset.name); }
+      if (e.key === 'Enter' && !e.target.closest('button')) { const tr = e.target.closest('tr[data-name]'); if (tr) location.hash = '#/containers/' + encodeURIComponent(tr.dataset.name); }
     });
   } else if (S.page === 'alerts') {
     m.innerHTML = `<div class="page-head"><h1>Alerts</h1><p class="sub" id="sub"></p></div>
@@ -258,7 +267,13 @@ function renderBanner() {
   const d = S.snap.docker;
   $('#banner').innerHTML = d.up ? '' : `<div class="banner" role="alert"><b>Docker is not reachable.</b> ${esc(d.error || '')} Container data below is the last known state.</div>`;
   const cs = S.snap.containers;
-  $('#sub').textContent = `${cs.filter((c) => c.state === 'running').length} of ${cs.length} running`;
+  const p = S.snap.poll;
+  let sub = `${cs.filter((c) => c.state === 'running').length} of ${cs.length} running`;
+  if (p && p.interval_ms) {
+    sub += `. Docker API: poll every ${(p.interval_ms / 1000).toFixed(1)}s, ${p.requests_per_sec.toFixed(1)} requests/s`;
+    if (p.throttle > 1) sub += `. Slowed ${p.throttle}x because Docker is answering slowly`;
+  }
+  $('#sub').textContent = sub;
 }
 
 function meter(label, valueText, p, sub, hist, color) {
@@ -299,18 +314,26 @@ function filtered() {
     if (S.filter === 'problem') return c.health === 'unhealthy' || ['restarting', 'dead', 'paused'].includes(c.state) || (c.state === 'exited' && /Exited \((?!0\))/.test(c.status)) || c.cpu_percent >= 90 || c.mem_percent >= 90;
     return true;
   });
-  const key = { name: (c) => c.name, cpu: (c) => -c.cpu_percent, mem: (c) => -c.mem_bytes, net: (c) => -(c.net_rx_bps + c.net_tx_bps) }[S.sort];
-  v.sort((a, b) => { const x = key(a), y = key(b); return x < y ? -1 : x > y ? 1 : a.name.localeCompare(b.name); });
+  const key = { name: (c) => c.name.toLowerCase(), state: (c) => c.state, cpu: (c) => c.cpu_percent, mem: (c) => c.mem_bytes, net: (c) => c.net_rx_bps + c.net_tx_bps }[S.sort];
+  const sign = S.dir === 'asc' ? 1 : -1;
+  v.sort((a, b) => { const x = key(a), y = key(b); return (x < y ? -1 : x > y ? 1 : a.name.localeCompare(b.name)) * sign; });
   return v;
 }
 
 function renderRows() {
   const rows = $('#rows');
   if (!rows || !S.snap) return;
+  const canAct = S.snap.allow_actions;
+  $('#th-actions').hidden = !canAct;
+  document.querySelectorAll('#thead [data-col]').forEach((th) => {
+    const on = th.dataset.col === S.sort;
+    th.setAttribute('aria-sort', on ? (S.dir === 'asc' ? 'ascending' : 'descending') : 'none');
+    $('.arrow', th).textContent = on ? (S.dir === 'asc' ? '▲' : '▼') : '';
+  });
   const v = filtered();
   if (!v.length) {
     const none = S.snap.containers.length === 0;
-    rows.innerHTML = `<tr><td colspan="5"><div class="empty"><b>${none ? 'No containers found' : 'Nothing matches this filter'}</b>${none ? (S.snap.docker.up ? 'Start a container and it will show up here.' : 'Check that the Docker daemon is running and that ctopx can reach it.') : 'Clear the filter to see all containers.'}</div></td></tr>`;
+    rows.innerHTML = `<tr><td colspan="6"><div class="empty"><b>${none ? 'No containers found' : 'Nothing matches this filter'}</b>${none ? (S.snap.docker.up ? 'Start a container and it will show up here.' : 'Check that the Docker daemon is running and that ctopx can reach it.') : 'Clear the filter to see all containers.'}</div></td></tr>`;
     return;
   }
   rows.innerHTML = v.map((c) => {
@@ -319,10 +342,29 @@ function renderRows() {
     return `<tr data-name="${esc(c.name)}" class="${stateClass(c)}" tabindex="0">
       <td class="name"><span class="edge"></span><strong>${esc(c.name)}</strong><small>${esc(c.image)}${c.project ? ' · ' + esc(c.project) : ''}</small></td>
       <td class="cpu ${run ? '' : 'dim'}">${run ? `<b>${pct(c.cpu_percent)}</b>${spark(h && h.cpu, 100)}` : '<b>-</b>'}</td>
-      <td class="mem ${run ? '' : 'dim'}">${run ? `<b>${bytes(c.mem_bytes)}</b><div class="meter ${level(c.mem_percent)}"><i style="width:${Math.min(100, c.mem_percent).toFixed(1)}%"></i></div><small>${c.mem_limit ? pct(c.mem_percent) + ' of ' + bytes(c.mem_limit) : 'no limit'}</small>` : '<b>-</b>'}</td>
+      <td class="mem ${run ? '' : 'dim'}">${run ? `<b>${bytes(c.mem_bytes)} / ${c.mem_limit ? bytes(c.mem_limit) : 'no limit'}</b><div class="meter ${level(c.mem_percent)}"><i style="width:${Math.min(100, c.mem_percent).toFixed(1)}%"></i></div><small>${c.mem_limit ? pct(c.mem_percent) + ' used' : 'limit not set'}</small>` : '<b>-</b>'}</td>
       <td class="net col-net ${run ? '' : 'dim'}">${run ? `↓ ${rate(c.net_rx_bps)}<br>↑ ${rate(c.net_tx_bps)}` : '-'}</td>
-      <td class="col-status">${statePill(c)}<small>${esc(c.status)}</small></td></tr>`;
+      <td class="col-status">${statePill(c)}<small>${esc(c.status)}</small></td>
+      ${canAct ? `<td class="col-actions"><button class="btn small" data-act="${run || c.state === 'paused' ? 'stop' : 'start'}" data-name="${esc(c.name)}">${run || c.state === 'paused' ? 'Stop' : 'Start'}</button> <button class="btn small" data-act="restart" data-name="${esc(c.name)}">Restart</button></td>` : ''}</tr>`;
   }).join('');
+}
+
+// ---------- actions ----------
+const CONFIRM = {
+  kill: (n) => `Kill ${n}? This sends SIGKILL and stops it immediately without a clean shutdown.`,
+  remove: (n) => `Remove ${n}? The container will be deleted. It must be stopped first.`,
+};
+async function runAction(name, act, btn) {
+  if (CONFIRM[act] && !window.confirm(CONFIRM[act](name))) return;
+  if (btn) btn.disabled = true;
+  try {
+    await post(`/api/containers/${encodeURIComponent(name)}/${act}`);
+    toast(name, `${act} sent`, 'ok', 3500);
+    if (act === 'remove' && S.arg === name) location.hash = '#/containers';
+  } catch (err) {
+    toast(`Could not ${act} ${name}`, err.message, 'error', 9000);
+  }
+  if (btn) btn.disabled = false;
 }
 
 // ---------- drawer ----------
@@ -348,9 +390,15 @@ function renderDrawer() {
   const run = c.state === 'running';
   const h = S.hist[c.name] || { cpu: [], mem: [], rx: [], tx: [] };
   const evs = S.events.filter((e) => e.subject === c.name).slice(0, 6);
+  const paused = c.state === 'paused';
   const acts = S.snap.allow_actions
-    ? `<div class="actions">${run ? '<button class="btn" data-act="stop">Stop</button>' : '<button class="btn primary" data-act="start">Start</button>'}<button class="btn" data-act="restart">Restart</button></div>`
-    : '<p class="muted">Start, stop and restart are turned off. Set <code>server.allow_actions = true</code> to enable them.</p>';
+    ? `<div class="actions">
+        ${run || paused ? '<button class="btn" data-act="stop">Stop</button>' : '<button class="btn primary" data-act="start">Start</button>'}
+        <button class="btn" data-act="restart">Restart</button>
+        ${run ? '<button class="btn" data-act="pause">Pause</button>' : ''}${paused ? '<button class="btn" data-act="unpause">Resume</button>' : ''}
+        ${run || paused ? '<button class="btn danger" data-act="kill">Kill</button>' : '<button class="btn danger" data-act="remove">Remove</button>'}
+      </div>`
+    : '<p class="muted">Start, stop and the other actions are turned off. Start ctopx with <code>--allow-actions</code> or set <code>server.allow_actions = true</code> to enable them.</p>';
   const scrollTop = drawer.scrollTop;
   drawer.innerHTML = `
     <div class="drawer-head"><div><h2>${esc(c.name)}</h2><div class="muted num">${esc(c.short_id)}</div></div><div>${statePill(c)} <button class="btn small" id="d-close">Close</button></div></div>
@@ -366,7 +414,7 @@ function renderDrawer() {
       <dt>Status</dt><dd>${esc(c.status)}</dd>
       ${c.health ? `<dt>Health</dt><dd>${esc(c.health)}</dd>` : ''}
       ${c.project ? `<dt>Compose project</dt><dd>${esc(c.project)}</dd>` : ''}
-      <dt>Memory</dt><dd>${bytes(c.mem_bytes)}${c.mem_limit ? ' of ' + bytes(c.mem_limit) : ' (no limit)'}</dd>
+      <dt>Memory</dt><dd>${bytes(c.mem_bytes)} / ${c.mem_limit ? bytes(c.mem_limit) : 'no limit'}${c.mem_limit ? ' (' + pct(c.mem_percent) + ')' : ''}</dd>
       <dt>Disk I/O</dt><dd>${rate(c.blk_read_bps)} read, ${rate(c.blk_write_bps)} write</dd>
       <dt>Network total</dt><dd>${bytes(c.net_rx_total)} in, ${bytes(c.net_tx_total)} out</dd>
       <dt>Processes</dt><dd>${c.pids}</dd>
@@ -376,12 +424,7 @@ function renderDrawer() {
     ${evs.length ? `<h2>Recent events</h2><div class="list">${evs.map((e) => `<div class="row"><span class="pill">${esc(e.action)}</span><div class="what">${esc(e.message)}</div><span class="when">${clock(e.ts)}</span></div>`).join('')}</div>` : ''}`;
   if (wasOpen) drawer.scrollTop = scrollTop; else drawer.focus?.();
   $('#d-close').onclick = closeDrawer;
-  drawer.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', async () => {
-    b.disabled = true;
-    try { await post(`/api/containers/${encodeURIComponent(c.name)}/${b.dataset.act}`); toast(c.name, `${b.dataset.act} sent`, 'ok', 3500); }
-    catch (err) { toast(`Could not ${b.dataset.act} ${c.name}`, err.message, 'error', 9000); }
-    b.disabled = false;
-  }));
+  drawer.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', () => runAction(c.name, b.dataset.act, b)));
 }
 
 // ---------- alerts page ----------

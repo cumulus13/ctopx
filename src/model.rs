@@ -144,6 +144,24 @@ pub struct EventRecord {
     pub notified_rules: Vec<String>,
 }
 
+/// How hard ctopx is currently working the Docker API.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PollInfo {
+    /// Effective time between polls, including any automatic slow-down.
+    pub interval_ms: u64,
+    /// How long the last poll took.
+    pub cycle_ms: u64,
+    /// 1 normally; doubles (up to 16) while Docker is slow to answer.
+    pub throttle: u32,
+    /// Docker API requests per second averaged over the last interval.
+    pub requests_per_sec: f64,
+    pub requests_total: u64,
+    /// Containers whose stats were fetched in the last poll.
+    pub stats_polled: usize,
+    /// "live" while a UI is open, "idle" otherwise.
+    pub mode: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Delivery {
     pub ts: i64,

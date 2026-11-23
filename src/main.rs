@@ -38,11 +38,21 @@ enum Cmd {
         serve: bool,
         #[arg(long)]
         bind: Option<String>,
+        /// Allow start/stop/restart/pause/kill/remove from the web UI and API too
+        #[arg(long)]
+        allow_actions: bool,
+        /// Disable container actions in the terminal UI (they are on by default there)
+        #[arg(long)]
+        read_only: bool,
     },
     /// Headless mode: collector, alerts, REST API and web UI
     Serve {
         #[arg(long)]
         bind: Option<String>,
+        /// Allow start/stop/restart/pause/kill/remove from the web UI and API
+        /// (same as server.allow_actions = true)
+        #[arg(long)]
+        allow_actions: bool,
     },
     /// Write an example config file
     Init {
@@ -134,9 +144,17 @@ fn real_main() -> Result<()> {
     match cli.cmd.unwrap_or(Cmd::Tui {
         serve: false,
         bind: None,
+        allow_actions: false,
+        read_only: false,
     }) {
-        Cmd::Serve { bind } => {
+        Cmd::Serve {
+            bind,
+            allow_actions,
+        } => {
             init_logging(false);
+            state
+                .actions_forced
+                .store(allow_actions, std::sync::atomic::Ordering::Relaxed);
             rt.block_on(async move {
                 if state.cfg().channels.is_empty() {
                     tracing::warn!("no notification channels configured: alerts will only be visible in the UI and API");
@@ -146,8 +164,19 @@ fn real_main() -> Result<()> {
                 web::serve(state, bind).await
             })
         }
-        Cmd::Tui { serve, bind } => {
+        Cmd::Tui {
+            serve,
+            bind,
+            allow_actions,
+            read_only,
+        } => {
             init_logging(true);
+            state
+                .actions_forced
+                .store(allow_actions, std::sync::atomic::Ordering::Relaxed);
+            state
+                .local_actions
+                .store(!read_only, std::sync::atomic::Ordering::Relaxed);
             rt.block_on(async move {
                 tokio::spawn(docker::run_collector(state.clone()));
                 tokio::spawn(docker::run_events(state.clone()));

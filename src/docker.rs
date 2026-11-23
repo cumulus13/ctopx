@@ -8,8 +8,9 @@ use anyhow::{Result, anyhow, bail};
 use bollard::Docker;
 use bollard::models::{ContainerStatsResponse, ContainerSummaryHealthStatusEnum};
 use bollard::query_parameters::{
-    EventsOptionsBuilder, ListContainersOptionsBuilder, RestartContainerOptionsBuilder,
-    StatsOptionsBuilder, StopContainerOptionsBuilder,
+    EventsOptionsBuilder, KillContainerOptionsBuilder, ListContainersOptionsBuilder,
+    RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder, StatsOptionsBuilder,
+    StopContainerOptionsBuilder,
 };
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -190,9 +191,21 @@ fn health_str(h: &Option<bollard::models::ContainerSummaryHealth>) -> Option<Str
     }
 }
 
-async fn poll_containers(state: &Arc<AppState>, prev: &mut HashMap<String, Prev>) -> Result<()> {
+/// Containers whose stats failed recently are left alone for a while so a stuck container
+/// cannot make ctopx pile requests onto an already struggling daemon.
+type Backoff = HashMap<String, (u32, Instant)>;
+
+/// Returns how many containers had their stats fetched.
+async fn poll_containers(
+    state: &Arc<AppState>,
+    prev: &mut HashMap<String, Prev>,
+    backoff: &mut Backoff,
+    live: bool,
+    every: Duration,
+) -> Result<usize> {
     let cfg = state.cfg();
     let docker = client(state)?;
+    state.count_request();
     let list = docker
         .list_containers(Some(
             ListContainersOptionsBuilder::default().all(true).build(),
@@ -257,37 +270,76 @@ async fn poll_containers(state: &Arc<AppState>, prev: &mut HashMap<String, Prev>
         rows.push(Row { view });
     }
 
-    // Fetch stats for running containers, a few at a time.
-    let running: Vec<(String, String)> = rows
+    // Decide which running containers need stats this round. With nobody watching, only those
+    // that an enabled container-metric rule can match.
+    let rules = cfg.effective_rules();
+    let metric_rules: Vec<_> = rules
+        .iter()
+        .filter(|r| r.enabled)
+        .filter(|r| matches!(&r.kind, crate::config::RuleKind::Metric { metric, .. } if !metric.is_host()))
+        .collect();
+    let now = Instant::now();
+    let wanted: Vec<String> = rows
         .iter()
         .filter(|r| r.view.is_running())
-        .map(|r| (r.view.id.clone(), r.view.name.clone()))
+        .filter(|r| live || metric_rules.iter().any(|m| m.matches_subject(&r.view.name)))
+        .filter(|r| {
+            backoff
+                .get(&r.view.id)
+                .is_none_or(|(_, until)| *until <= now)
+        })
+        .map(|r| r.view.id.clone())
         .collect();
-    let stats: Vec<(String, Option<ContainerStatsResponse>)> = futures_util::stream::iter(running)
-        .map(|(id, _name)| {
-            let docker = docker.clone();
+    let polled = wanted.len();
+    state
+        .requests
+        .fetch_add(polled as u64, std::sync::atomic::Ordering::Relaxed);
+
+    let docker2 = docker.clone();
+    let fetched: Vec<(String, Option<ContainerStatsResponse>)> = futures_util::stream::iter(wanted)
+        .map(|id| {
+            let docker = docker2.clone();
             async move {
                 let opts = StatsOptionsBuilder::default()
                     .stream(false)
                     .one_shot(true)
                     .build();
                 let mut st = docker.stats(&id, Some(opts));
-                let r = tokio::time::timeout(Duration::from_secs(5), st.next()).await;
-                match r {
+                match tokio::time::timeout(Duration::from_secs(5), st.next()).await {
                     Ok(Some(Ok(s))) => (id, Some(s)),
                     _ => (id, None),
                 }
             }
         })
-        .buffer_unordered(8)
+        .buffer_unordered(cfg.docker.max_concurrency.max(1))
         .collect()
         .await;
-    let stats: HashMap<String, ContainerStatsResponse> = stats
-        .into_iter()
-        .filter_map(|(id, s)| s.map(|s| (id, s)))
-        .collect();
-
     let now = Instant::now();
+    let mut stats: HashMap<String, ContainerStatsResponse> = HashMap::new();
+    for (id, s) in fetched {
+        match s {
+            Some(s) => {
+                backoff.remove(&id);
+                stats.insert(id, s);
+            }
+            None => {
+                let n = backoff.get(&id).map(|(n, _)| *n).unwrap_or(0) + 1;
+                let wait = every
+                    .saturating_mul(1 << n.min(5))
+                    .min(Duration::from_secs(60));
+                tracing::debug!("stats for {id} failed {n} time(s); skipping it for {wait:?}");
+                backoff.insert(id, (n, now + wait));
+            }
+        }
+    }
+    // Do not average CPU over a long gap (for example right after idle polling).
+    let max_age = Duration::from_secs(60).max(every * 3);
+    for p in prev.values_mut() {
+        if p.at.is_some_and(|t| now.duration_since(t) > max_age) {
+            *p = Prev::default();
+        }
+    }
+
     let mut map = state.containers.write().unwrap();
     let old = std::mem::take(&mut *map);
     let mut live_ids = std::collections::HashSet::new();
@@ -369,7 +421,8 @@ async fn poll_containers(state: &Arc<AppState>, prev: &mut HashMap<String, Prev>
         map.insert(view.name.clone(), view);
     }
     prev.retain(|id, _| live_ids.contains(id));
-    Ok(())
+    backoff.retain(|id, _| live_ids.contains(id));
+    Ok(polled)
 }
 
 fn set_status(state: &Arc<AppState>, up: bool, err: Option<String>) {
@@ -390,14 +443,35 @@ fn set_status(state: &Arc<AppState>, up: bool, err: Option<String>) {
 }
 
 /// Main collection loop: Docker + host metrics, then rule evaluation.
+///
+/// Polling pace adapts so ctopx does not load the Docker daemon needlessly: `interval_secs`
+/// while a UI is open, `idle_interval_secs` otherwise, and it backs off further (up to 16x)
+/// while Docker takes a large share of the interval just to answer.
 pub async fn run_collector(state: Arc<AppState>) {
     let mut prev: HashMap<String, Prev> = HashMap::new();
+    let mut backoff: Backoff = HashMap::new();
     let mut host = crate::host::HostCollector::new();
+    let mut factor: u32 = 1;
     loop {
         let cfg = state.cfg();
+        let live = state.viewers.load(std::sync::atomic::Ordering::Relaxed) > 0;
+        let base = Duration::from_secs(
+            if live {
+                cfg.docker.interval_secs
+            } else {
+                cfg.docker.idle_interval_secs.max(cfg.docker.interval_secs)
+            }
+            .max(1),
+        );
+        let every = base * factor;
+        let req_before = state.requests.load(std::sync::atomic::Ordering::Relaxed);
         let started = Instant::now();
-        match poll_containers(&state, &mut prev).await {
-            Ok(()) => set_status(&state, true, None),
+        let mut polled = 0;
+        match poll_containers(&state, &mut prev, &mut backoff, live, every).await {
+            Ok(n) => {
+                polled = n;
+                set_status(&state, true, None)
+            }
             Err(e) => set_status(&state, false, Some(format!("{e}"))),
         }
         if cfg.host.enabled {
@@ -406,8 +480,31 @@ pub async fn run_collector(state: Arc<AppState>) {
         }
         engine::evaluate(&state);
         let spent = started.elapsed();
-        let every = Duration::from_secs(cfg.docker.interval_secs.max(1));
-        tokio::time::sleep(every.saturating_sub(spent).max(Duration::from_millis(200))).await;
+
+        if cfg.docker.adaptive {
+            if spent > base.mul_f32(0.4) {
+                factor = (factor * 2).min(16);
+            } else if spent < base.mul_f32(0.15) && factor > 1 {
+                factor /= 2;
+            }
+        }
+        let reqs = state.requests.load(std::sync::atomic::Ordering::Relaxed) - req_before;
+        *state.poll.write().unwrap() = PollInfo {
+            interval_ms: (base * factor).as_millis() as u64,
+            cycle_ms: spent.as_millis() as u64,
+            throttle: factor,
+            requests_per_sec: reqs as f64 / (base * factor).as_secs_f64().max(0.001),
+            requests_total: state.requests.load(std::sync::atomic::Ordering::Relaxed),
+            stats_polled: polled,
+            mode: if live { "live" } else { "idle" }.into(),
+        };
+        let wait = (base * factor)
+            .saturating_sub(spent)
+            .max(Duration::from_millis(200));
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = state.wake.notified() => {}
+        }
     }
 }
 
@@ -469,11 +566,15 @@ pub async fn run_events(state: Arc<AppState>) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Start,
     Stop,
     Restart,
+    Pause,
+    Unpause,
+    Kill,
+    Remove,
 }
 
 impl std::str::FromStr for Action {
@@ -483,14 +584,45 @@ impl std::str::FromStr for Action {
             "start" => Ok(Action::Start),
             "stop" => Ok(Action::Stop),
             "restart" => Ok(Action::Restart),
-            _ => bail!("unknown action '{s}' (use start, stop or restart)"),
+            "pause" => Ok(Action::Pause),
+            "unpause" => Ok(Action::Unpause),
+            "kill" => Ok(Action::Kill),
+            "remove" => Ok(Action::Remove),
+            _ => bail!(
+                "unknown action '{s}' (use start, stop, restart, pause, unpause, kill or remove)"
+            ),
         }
     }
 }
 
-pub async fn container_action(state: &Arc<AppState>, name: &str, action: Action) -> Result<()> {
-    if !state.cfg().server.allow_actions {
-        bail!("container actions are disabled (set server.allow_actions = true)");
+/// Where an action request came from. Remote (HTTP) needs `server.allow_actions` or
+/// `--allow-actions`; Local (the terminal UI) is allowed unless started with `--read-only`.
+#[derive(Debug, Clone, Copy)]
+pub enum Source {
+    Local,
+    Remote,
+}
+
+pub async fn container_action(
+    state: &Arc<AppState>,
+    name: &str,
+    action: Action,
+    source: Source,
+) -> Result<()> {
+    match source {
+        Source::Remote if !state.remote_actions_allowed() => {
+            bail!(
+                "container actions are disabled: set server.allow_actions = true or start with --allow-actions"
+            )
+        }
+        Source::Local
+            if !state
+                .local_actions
+                .load(std::sync::atomic::Ordering::Relaxed) =>
+        {
+            bail!("container actions are disabled: ctopx was started with --read-only")
+        }
+        _ => {}
     }
     let id = state
         .containers
@@ -500,6 +632,7 @@ pub async fn container_action(state: &Arc<AppState>, name: &str, action: Action)
         .map(|c| c.id.clone())
         .ok_or_else(|| anyhow!("unknown container '{name}'"))?;
     let docker = client(state)?;
+    state.count_request();
     match action {
         Action::Start => docker.start_container(&id, None).await?,
         Action::Stop => {
@@ -518,6 +651,107 @@ pub async fn container_action(state: &Arc<AppState>, name: &str, action: Action)
                 )
                 .await?
         }
+        Action::Pause => docker.pause_container(&id).await?,
+        Action::Unpause => docker.unpause_container(&id).await?,
+        Action::Kill => {
+            docker
+                .kill_container(
+                    &id,
+                    Some(
+                        KillContainerOptionsBuilder::default()
+                            .signal("SIGKILL")
+                            .build(),
+                    ),
+                )
+                .await?
+        }
+        // No force: Docker refuses to remove a running container, which is the safe behaviour.
+        Action::Remove => {
+            docker
+                .remove_container(&id, Some(RemoveContainerOptionsBuilder::default().force(false).build()))
+                .await
+                .map_err(|e| {
+                    if e.to_string().contains("409") {
+                        anyhow!("Docker refused to remove {name} (409 conflict). A running container must be stopped first.")
+                    } else {
+                        anyhow::Error::from(e)
+                    }
+                })?;
+        }
     }
+    state.wake.notify_one();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use std::sync::atomic::Ordering;
+
+    fn state() -> Arc<AppState> {
+        AppState::new(Config::default(), None, None)
+    }
+
+    #[test]
+    fn parses_every_action() {
+        for (s, a) in [
+            ("start", Action::Start),
+            ("stop", Action::Stop),
+            ("restart", Action::Restart),
+            ("pause", Action::Pause),
+            ("unpause", Action::Unpause),
+            ("kill", Action::Kill),
+            ("remove", Action::Remove),
+        ] {
+            assert_eq!(s.parse::<Action>().unwrap(), a);
+        }
+        assert!("explode".parse::<Action>().is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_actions_are_off_by_default() {
+        let st = state();
+        let e = container_action(&st, "x", Action::Stop, Source::Remote)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("--allow-actions"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn allow_actions_flag_opens_the_remote_gate() {
+        let st = state();
+        st.actions_forced.store(true, Ordering::Relaxed);
+        // Past the gate the next failure is the unknown container, not "disabled".
+        let e = container_action(&st, "x", Action::Stop, Source::Remote)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("unknown container"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn local_actions_default_on_and_read_only_blocks_them() {
+        let st = state();
+        let e = container_action(&st, "x", Action::Stop, Source::Local)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("unknown container"), "{e}");
+        st.local_actions.store(false, Ordering::Relaxed);
+        let e = container_action(&st, "x", Action::Stop, Source::Local)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("--read-only"), "{e}");
+    }
+
+    #[test]
+    fn viewer_guard_counts_open_uis() {
+        let st = state();
+        assert_eq!(st.viewers.load(Ordering::Relaxed), 0);
+        let g1 = st.add_viewer();
+        let g2 = st.add_viewer();
+        assert_eq!(st.viewers.load(Ordering::Relaxed), 2);
+        drop(g1);
+        drop(g2);
+        assert_eq!(st.viewers.load(Ordering::Relaxed), 0);
+    }
 }

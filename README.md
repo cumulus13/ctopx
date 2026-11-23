@@ -20,6 +20,7 @@ ctopx test-notify              # sends a test message to every channel
 ctopx                          # terminal UI; alerts keep working while it is open
 ctopx serve                    # headless: collector + alerts + API + web UI on 127.0.0.1:8686
 ctopx tui --serve              # terminal UI and web UI together
+ctopx serve --allow-actions    # let the web UI and API start/stop/restart/pause/kill/remove containers
 ```
 
 Without a config file ctopx runs with built-in rules and no channels: alerts show up in the UIs only.
@@ -119,8 +120,32 @@ Generic webhook payload:
 
 ## Terminal UI
 
-`↑↓`/`j k` select, `Enter` details with sparklines, `/` filter, `s` cycle sort, `a` show or hide stopped, `Tab` or `1 2 3` switch between Containers, Alerts and Events, `S` start/stop and `R` restart (only when `server.allow_actions = true`), `q` quit.
+Each container row shows CPU with a bar, memory as `used / total` plus a percentage, network in and out, PIDs and status. The column you sort by carries an arrow (`▲` ascending, `▼` descending).
+
+| Key | Action |
+|---|---|
+| `↑ ↓` / `j k`, `PgUp PgDn`, `g G` | select |
+| `Enter` | details with sparklines |
+| `/` | filter by name or image |
+| `s` | next sort column (name, status, cpu, memory, network, pids) |
+| `r` | reverse the sort direction |
+| `a` | show or hide stopped containers |
+| `S` | start or stop |
+| `R` | restart |
+| `P` | pause or resume |
+| `K` | kill (SIGKILL), asks for confirmation |
+| `D` | remove, asks for confirmation (Docker refuses while the container runs) |
+| `Tab`, `1 2 3` | Containers, Alerts, Events |
+| `q` | quit |
+
+Actions in the TUI are on by default because you are at the machine; start with `--read-only` to disable them.
 In TUI mode logs go to `ctopx.log` in the system temp directory.
+
+## Web UI
+
+Click a column header to sort by it; click again to reverse (arrow shows the direction). Memory is shown as `used / total`. With actions enabled there are Stop/Start and Restart buttons on every row, and the detail drawer adds Pause/Resume, Kill and Remove (the last two ask for confirmation).
+
+Actions over HTTP (web UI and API) are **off by default**. Turn them on with `server.allow_actions = true` or `ctopx serve --allow-actions`.
 
 ## HTTP API
 
@@ -131,7 +156,7 @@ Everything under `/api` and `/metrics` requires `Authorization: Bearer <token>` 
 | `GET /api/state` | full snapshot: host, containers, docker status, active alerts |
 | `GET /api/stream` | SSE: `snapshot` every tick, plus `alert`, `docker_event`, `delivery` |
 | `GET /api/containers`, `/api/containers/{name}` | metrics (detail includes history) |
-| `POST /api/containers/{name}/{start\|stop\|restart}` | needs `server.allow_actions = true` |
+| `POST /api/containers/{name}/{start\|stop\|restart\|pause\|unpause\|kill\|remove}` | needs `server.allow_actions = true` or `--allow-actions` |
 | `GET /api/history` | recent samples for sparklines |
 | `GET /api/alerts`, `/api/alerts/history` | active and resolved alerts |
 | `GET /api/events`, `/api/deliveries` | Docker events and notification delivery log |
@@ -141,11 +166,24 @@ Everything under `/api` and `/metrics` requires `Authorization: Bearer <token>` 
 | `POST /api/reload` | re-read the config (rules and channels; bind, token and docker settings need a restart) |
 | `GET /metrics` | Prometheus text format |
 
+## Load on the Docker daemon
+
+`dockerd` pays for every stats request, and the cost grows with the number of containers. ctopx keeps it low:
+
+- **Slow when idle.** With no web UI or TUI open, containers are polled every `docker.idle_interval_secs` (default 10 s) instead of `docker.interval_secs` (default 2 s). Opening a UI switches to the fast pace within a moment.
+- **Only what alerts need.** With nobody watching, stats are fetched only for containers that an enabled container-metric rule can match. If you have none, no stats requests are made at all (events and the container list still work).
+- **Bounded bursts.** At most `docker.max_concurrency` (default 4) stats requests run at once.
+- **Self-throttling.** If a poll takes more than 40% of the interval, ctopx doubles its interval (up to 16x) and halves it again once Docker is quick. The UI and TUI header show when this happens. Disable with `docker.adaptive = false`.
+- **Backoff per container.** A container whose stats keep failing or timing out is skipped for a growing delay (up to 60 s) instead of being hit every cycle.
+- **Visible.** The web UI and TUI show the poll interval and Docker requests per second; `/metrics` exposes `ctopx_docker_requests_total`, `ctopx_poll_interval_seconds`, `ctopx_poll_cycle_seconds` and `ctopx_poll_throttle`.
+
+While a UI is open the rate is roughly `running containers / interval_secs`, for example 20 requests/s for 40 containers at 2 s. If that is still too much for your host, raise `docker.interval_secs` (3 to 5 s is plenty for a dashboard) or narrow `docker.include`.
+
 ## Security
 
 - The default bind is `127.0.0.1:8686`. Binding elsewhere without a token logs a warning.
-- ctopx refuses to start if it is reachable from the network, `allow_actions` is on and there is no token.
-- Container actions are off by default. Access to the Docker socket is effectively root on the host, so treat the token accordingly and put TLS in front (reverse proxy) if you expose the port.
+- ctopx refuses to start if it is reachable from the network, container actions are enabled and there is no token.
+- Container actions over HTTP are off by default (`server.allow_actions` or `--allow-actions`). Access to the Docker socket is effectively root on the host, so treat the token accordingly and put TLS in front (reverse proxy) if you expose the port.
 
 ## Design notes
 

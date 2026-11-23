@@ -7,9 +7,10 @@ use crate::notify::Notifier;
 use bollard::Docker;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
-use tokio::sync::broadcast;
+use tokio::sync::{Notify, broadcast};
 
 pub struct DockerStatus {
     pub up: bool,
@@ -31,6 +32,25 @@ pub struct AppState {
     pub started: Instant,
     /// One-line message for the TUI footer (e.g. web server bind errors).
     pub notice: Mutex<Option<String>>,
+    /// Number of open UIs (SSE clients, TUI). Polling is slower when this is zero.
+    pub viewers: AtomicUsize,
+    /// Docker API requests made so far.
+    pub requests: AtomicU64,
+    pub poll: RwLock<PollInfo>,
+    /// Wakes the collector early (a viewer connected, an action ran).
+    pub wake: Notify,
+    /// `--allow-actions` on the command line: enables actions over HTTP regardless of the config.
+    pub actions_forced: AtomicBool,
+    /// Actions from the local terminal UI. On unless `--read-only`.
+    pub local_actions: AtomicBool,
+}
+
+/// Counts an open UI for as long as it lives.
+pub struct ViewerGuard(Arc<AppState>);
+impl Drop for ViewerGuard {
+    fn drop(&mut self) {
+        self.0.viewers.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl AppState {
@@ -54,11 +74,32 @@ impl AppState {
             notifier: RwLock::new(Arc::new(notifier)),
             started: Instant::now(),
             notice: Mutex::new(None),
+            viewers: AtomicUsize::new(0),
+            requests: AtomicU64::new(0),
+            poll: RwLock::new(PollInfo::default()),
+            wake: Notify::new(),
+            actions_forced: AtomicBool::new(false),
+            local_actions: AtomicBool::new(true),
         })
     }
 
     pub fn cfg(&self) -> Arc<Config> {
         self.cfg.read().unwrap().clone()
+    }
+
+    pub fn add_viewer(self: &Arc<Self>) -> ViewerGuard {
+        if self.viewers.fetch_add(1, Ordering::Relaxed) == 0 {
+            self.wake.notify_one();
+        }
+        ViewerGuard(self.clone())
+    }
+
+    pub fn remote_actions_allowed(&self) -> bool {
+        self.actions_forced.load(Ordering::Relaxed) || self.cfg().server.allow_actions
+    }
+
+    pub fn count_request(&self) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn docker_up(&self) -> bool {

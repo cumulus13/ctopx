@@ -55,7 +55,14 @@ impl Default for ServerCfg {
 pub struct DockerCfg {
     /// Overrides DOCKER_HOST (tcp://..., unix://..., npipe://...).
     pub host: Option<String>,
+    /// Poll interval while a UI (web, TUI) is open.
     pub interval_secs: u64,
+    /// Poll interval when nobody is watching. Alerts are still evaluated at this pace.
+    pub idle_interval_secs: u64,
+    /// Maximum simultaneous stats requests sent to Docker.
+    pub max_concurrency: usize,
+    /// Slow polling down automatically when Docker answers slowly.
+    pub adaptive: bool,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
 }
@@ -64,6 +71,9 @@ impl Default for DockerCfg {
         Self {
             host: None,
             interval_secs: 2,
+            idle_interval_secs: 10,
+            max_concurrency: 4,
+            adaptive: true,
             include: star(),
             exclude: vec![],
         }
@@ -604,8 +614,11 @@ impl Config {
                 }
             }
         }
-        if self.docker.interval_secs == 0 {
-            errs.push("docker.interval_secs must be >= 1".into());
+        if self.docker.interval_secs == 0 || self.docker.idle_interval_secs == 0 {
+            errs.push("docker.interval_secs and docker.idle_interval_secs must be >= 1".into());
+        }
+        if self.docker.max_concurrency == 0 {
+            errs.push("docker.max_concurrency must be >= 1".into());
         }
         errs
     }

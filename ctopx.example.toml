@@ -5,13 +5,20 @@
 [server]
 bind = "127.0.0.1:8686"      # web UI + API + /metrics. Use 0.0.0.0:8686 only together with a token.
 # token = "${CTOPX_TOKEN}"   # bearer token for /api and /metrics (the web UI asks for it)
-allow_actions = false        # allow start/stop/restart from the web UI, API and TUI
+allow_actions = false        # allow start/stop/restart/pause/kill/remove from the web UI and API
+                             # (or start with --allow-actions). The TUI allows them unless started with --read-only.
 # name = "docker-host-1"     # shown in notification titles (default: host name)
 # public_url = "https://ctopx.example.com"   # adds an "open dashboard" link to notifications
 
 [docker]
 # host = "tcp://127.0.0.1:2375"   # overrides DOCKER_HOST; default: local socket / named pipe
-interval_secs = 2
+
+# How often Docker is polled. Every container needs one stats request per poll, so the load on
+# dockerd is roughly (running containers / interval) requests per second.
+interval_secs = 2                 # while a UI is open (web UI, TUI)
+idle_interval_secs = 10           # when nobody is watching; alerts still work, just checked this often
+max_concurrency = 4               # simultaneous stats requests
+adaptive = true                   # slow down automatically (up to 16x) when Docker answers slowly
 include = ["*"]                   # container name globs (* and ?)
 exclude = []                      # e.g. ["*-tmp", "ci-*"]
 

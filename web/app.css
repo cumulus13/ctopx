@@ -181,3 +181,13 @@ dialog input, dialog select { width: 100%; color: var(--ink); }
 @media (prefers-reduced-motion: reduce) {
   .drawer, .toast { animation: none; }
 }
+
+.th-sort { font: inherit; font-weight: 560; font-size: 12.5px; color: var(--muted); background: none; border: 0; padding: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.th-sort:hover { color: var(--ink); }
+th[aria-sort="ascending"] .th-sort, th[aria-sort="descending"] .th-sort { color: var(--ink); }
+.arrow { display: inline-block; min-width: 1em; color: var(--accent); font-size: 11px; }
+.col-actions { white-space: nowrap; text-align: right; }
+td.mem { width: 220px; }
+.btn.danger:hover { background: color-mix(in srgb, var(--crit) 12%, var(--panel)); }
+
+[hidden] { display: none !important; }

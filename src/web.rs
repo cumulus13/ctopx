@@ -1,6 +1,6 @@
 //! HTTP API, SSE stream, Prometheus metrics and the embedded web UI.
 
-use crate::docker::{Action, container_action};
+use crate::docker::{Action, Source, container_action};
 use crate::model::*;
 use crate::notify;
 use crate::state::AppState;
@@ -103,7 +103,8 @@ fn snapshot(state: &Arc<AppState>) -> Value {
         "ts": now_ms(),
         "instance": cfg.instance_name(),
         "version": env!("CARGO_PKG_VERSION"),
-        "allow_actions": cfg.server.allow_actions,
+        "allow_actions": state.remote_actions_allowed(),
+        "poll": state.poll.read().unwrap().clone(),
         "docker": { "up": up, "error": error },
         "host": host,
         "containers": containers,
@@ -149,7 +150,7 @@ async fn do_action(state: St, path: web::Path<(String, String)>) -> HttpResponse
         Ok(a) => a,
         Err(e) => return fail(StatusCode::BAD_REQUEST, e.to_string()),
     };
-    match container_action(&state, &name, action).await {
+    match container_action(&state, &name, action, Source::Remote).await {
         Ok(()) => HttpResponse::Ok().json(json!({ "ok": true })),
         Err(e) if e.to_string().contains("disabled") => fail(StatusCode::FORBIDDEN, e.to_string()),
         Err(e) => fail(StatusCode::BAD_GATEWAY, format!("{e:#}")),
@@ -272,33 +273,42 @@ fn sse(name: &str, data: &Value) -> Bytes {
 async fn stream(state: St) -> HttpResponse {
     let rx = state.bus.subscribe();
     let st = state.get_ref().clone();
+    // Counts this client as a viewer so the collector polls at the fast pace while it is connected.
+    let guard = st.add_viewer();
     let first = sse("snapshot", &snapshot(&st));
-    let s =
-        futures_util::stream::unfold((rx, st, Some(first)), |(mut rx, st, pending)| async move {
+    let s = futures_util::stream::unfold(
+        (rx, st, Some(first), guard),
+        |(mut rx, st, pending, guard)| async move {
             if let Some(b) = pending {
-                return Some((Ok::<Bytes, Error>(b), (rx, st, None)));
+                return Some((Ok::<Bytes, Error>(b), (rx, st, None, guard)));
             }
             loop {
                 match tokio::time::timeout(Duration::from_secs(15), rx.recv()).await {
-                    Err(_) => return Some((Ok(Bytes::from_static(b": ping\n\n")), (rx, st, None))),
+                    Err(_) => {
+                        return Some((
+                            Ok(Bytes::from_static(b": ping\n\n")),
+                            (rx, st, None, guard),
+                        ));
+                    }
                     Ok(Ok(BusMsg::Tick)) => {
                         let b = sse("snapshot", &snapshot(&st));
-                        return Some((Ok(b), (rx, st, None)));
+                        return Some((Ok(b), (rx, st, None, guard)));
                     }
                     Ok(Ok(BusMsg::Alert(a))) => {
-                        return Some((Ok(sse("alert", &json!(a))), (rx, st, None)));
+                        return Some((Ok(sse("alert", &json!(a))), (rx, st, None, guard)));
                     }
                     Ok(Ok(BusMsg::Event(e))) => {
-                        return Some((Ok(sse("docker_event", &json!(e))), (rx, st, None)));
+                        return Some((Ok(sse("docker_event", &json!(e))), (rx, st, None, guard)));
                     }
                     Ok(Ok(BusMsg::Delivery(d))) => {
-                        return Some((Ok(sse("delivery", &json!(d))), (rx, st, None)));
+                        return Some((Ok(sse("delivery", &json!(d))), (rx, st, None, guard)));
                     }
                     Ok(Err(RecvError::Lagged(_))) => continue,
                     Ok(Err(RecvError::Closed)) => return None,
                 }
             }
-        });
+        },
+    );
     HttpResponse::Ok()
         .insert_header(("content-type", "text/event-stream"))
         .insert_header(("cache-control", "no-cache"))
@@ -317,6 +327,17 @@ async fn metrics(state: St) -> HttpResponse {
     let up = state.docker_up() as u8;
     o.push_str(&format!(
         "# TYPE ctopx_docker_up gauge\nctopx_docker_up {up}\n"
+    ));
+    let poll = state.poll.read().unwrap().clone();
+    o.push_str(&format!(
+        "# TYPE ctopx_docker_requests_total counter\nctopx_docker_requests_total {}\n\
+         # TYPE ctopx_poll_interval_seconds gauge\nctopx_poll_interval_seconds {}\n\
+         # TYPE ctopx_poll_cycle_seconds gauge\nctopx_poll_cycle_seconds {}\n\
+         # TYPE ctopx_poll_throttle gauge\nctopx_poll_throttle {}\n",
+        poll.requests_total,
+        poll.interval_ms as f64 / 1000.0,
+        poll.cycle_ms as f64 / 1000.0,
+        poll.throttle
     ));
     let cs: Vec<ContainerView> = state.containers.read().unwrap().values().cloned().collect();
     for (metric, f) in [
@@ -399,9 +420,9 @@ pub async fn serve(state: Arc<AppState>, bind_override: Option<String>) -> anyho
     let bind = bind_override.unwrap_or_else(|| cfg.server.bind.clone());
     let has_token = cfg.server.token.as_deref().is_some_and(|t| !t.is_empty());
     if !is_loopback(&bind) && !has_token {
-        if cfg.server.allow_actions {
+        if state.remote_actions_allowed() {
             anyhow::bail!(
-                "refusing to start: {bind} is not a loopback address, server.allow_actions is on and server.token is empty. Set a token or bind to 127.0.0.1."
+                "refusing to start: {bind} is not a loopback address, container actions are enabled and server.token is empty. Set a token or bind to 127.0.0.1."
             );
         }
         tracing::warn!(

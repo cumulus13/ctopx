@@ -1,6 +1,6 @@
 //! Terminal UI (ratatui). Alerts and notifications keep running while it is open.
 
-use crate::docker::{Action, container_action};
+use crate::docker::{Action, Source, container_action};
 use crate::model::*;
 use crate::state::AppState;
 use anyhow::Result;
@@ -24,42 +24,56 @@ enum Tab {
 #[derive(Clone, Copy, PartialEq)]
 enum Sort {
     Name,
+    State,
     Cpu,
     Mem,
     Net,
-    State,
+    Pids,
 }
 
 impl Sort {
     fn next(self) -> Self {
         match self {
-            Sort::Name => Sort::Cpu,
+            Sort::Name => Sort::State,
+            Sort::State => Sort::Cpu,
             Sort::Cpu => Sort::Mem,
             Sort::Mem => Sort::Net,
-            Sort::Net => Sort::State,
-            Sort::State => Sort::Name,
+            Sort::Net => Sort::Pids,
+            Sort::Pids => Sort::Name,
         }
     }
     fn label(self) -> &'static str {
         match self {
             Sort::Name => "name",
+            Sort::State => "status",
             Sort::Cpu => "cpu",
             Sort::Mem => "memory",
             Sort::Net => "network",
-            Sort::State => "state",
+            Sort::Pids => "pids",
         }
     }
+    /// Numeric columns start with the biggest value on top, text columns A to Z.
+    fn default_asc(self) -> bool {
+        matches!(self, Sort::Name | Sort::State)
+    }
+}
+
+struct Pending {
+    action: Action,
+    name: String,
 }
 
 struct App {
     tab: Tab,
     sort: Sort,
+    asc: bool,
     selected: Option<String>,
     scroll: usize,
     filter: String,
     filtering: bool,
     show_all: bool,
     detail: bool,
+    pending: Option<Pending>,
     message: Option<(String, Instant)>,
     flash: Arc<Mutex<Option<String>>>,
     quit: bool,
@@ -88,6 +102,15 @@ fn rate(b: f64) -> String {
     }
 }
 
+fn mem_pair(c: &ContainerView) -> String {
+    let used = human_bytes(c.mem_bytes as f64);
+    if c.mem_limit > 0 {
+        format!("{used} / {}", human_bytes(c.mem_limit as f64))
+    } else {
+        format!("{used} / no limit")
+    }
+}
+
 fn state_style(c: &ContainerView) -> (&'static str, Color) {
     if c.health.as_deref() == Some("unhealthy") {
         return ("●", Color::Red);
@@ -102,6 +125,7 @@ fn state_style(c: &ContainerView) -> (&'static str, Color) {
 }
 
 fn visible(state: &Arc<AppState>, app: &App) -> Vec<ContainerView> {
+    let q = app.filter.to_lowercase();
     let mut v: Vec<ContainerView> = state
         .containers
         .read()
@@ -109,25 +133,33 @@ fn visible(state: &Arc<AppState>, app: &App) -> Vec<ContainerView> {
         .values()
         .filter(|c| app.show_all || c.is_running())
         .filter(|c| {
-            app.filter.is_empty()
-                || c.name.to_lowercase().contains(&app.filter.to_lowercase())
-                || c.image.to_lowercase().contains(&app.filter.to_lowercase())
+            q.is_empty()
+                || c.name.to_lowercase().contains(&q)
+                || c.image.to_lowercase().contains(&q)
         })
         .cloned()
         .collect();
-    match app.sort {
-        Sort::Name => v.sort_by(|a, b| a.name.cmp(&b.name)),
-        Sort::Cpu => v.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent)),
-        Sort::Mem => v.sort_by_key(|c| std::cmp::Reverse(c.mem_bytes)),
-        Sort::Net => v.sort_by(|a, b| {
-            (b.net_rx_bps + b.net_tx_bps).total_cmp(&(a.net_rx_bps + a.net_tx_bps))
-        }),
-        Sort::State => v.sort_by(|a, b| a.state.cmp(&b.state).then(a.name.cmp(&b.name))),
+    // Sort ascending by the chosen key (ties by name), then flip for descending.
+    v.sort_by(|a, b| {
+        let ord = match app.sort {
+            Sort::Name => a.name.cmp(&b.name),
+            Sort::State => a.state.cmp(&b.state),
+            Sort::Cpu => a.cpu_percent.total_cmp(&b.cpu_percent),
+            Sort::Mem => a.mem_bytes.cmp(&b.mem_bytes),
+            Sort::Net => (a.net_rx_bps + a.net_tx_bps).total_cmp(&(b.net_rx_bps + b.net_tx_bps)),
+            Sort::Pids => a.pids.cmp(&b.pids),
+        };
+        ord.then_with(|| a.name.cmp(&b.name))
+    });
+    if !app.asc {
+        v.reverse();
     }
     v
 }
 
 pub async fn run(state: Arc<AppState>) -> Result<()> {
+    // The TUI counts as an open UI: the collector polls at the fast pace while it runs.
+    let _viewer = state.add_viewer();
     let mut terminal = ratatui::init();
     let res = event_loop(&mut terminal, state).await;
     ratatui::restore();
@@ -138,12 +170,14 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, state: Arc<AppState
     let mut app = App {
         tab: Tab::Containers,
         sort: Sort::Name,
+        asc: true,
         selected: None,
         scroll: 0,
         filter: String::new(),
         filtering: false,
         show_all: true,
         detail: false,
+        pending: None,
         message: None,
         flash: Arc::new(Mutex::new(None)),
         quit: false,
@@ -155,10 +189,10 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, state: Arc<AppState
         tokio::select! {
             _ = tick.tick() => {}
             ev = events.next() => {
-                if let Some(Ok(Event::Key(k))) = ev {
-                    if k.kind == KeyEventKind::Press {
-                        on_key(k, &state, &mut app);
-                    }
+                if let Some(Ok(Event::Key(k))) = ev
+                    && k.kind == KeyEventKind::Press
+                {
+                    on_key(k, &state, &mut app);
                 }
             }
         }
@@ -169,9 +203,27 @@ async fn event_loop(terminal: &mut ratatui::DefaultTerminal, state: Arc<AppState
     Ok(())
 }
 
+fn spawn_action(state: &Arc<AppState>, app: &App, name: String, action: Action) {
+    let (st, flash) = (state.clone(), app.flash.clone());
+    tokio::spawn(async move {
+        let msg = match container_action(&st, &name, action, Source::Local).await {
+            Ok(()) => format!("{action:?} sent to {name}"),
+            Err(e) => format!("{name}: {e:#}"),
+        };
+        *flash.lock().unwrap() = Some(msg);
+    });
+}
+
 fn on_key(k: KeyEvent, state: &Arc<AppState>, app: &mut App) {
     if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
         app.quit = true;
+        return;
+    }
+    // Waiting for y/n on a destructive action.
+    if let Some(p) = app.pending.take() {
+        if matches!(k.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            spawn_action(state, app, p.name, p.action);
+        }
         return;
     }
     if app.filtering {
@@ -235,23 +287,31 @@ fn on_key(k: KeyEvent, state: &Arc<AppState>, app: &mut App) {
         KeyCode::End | KeyCode::Char('G') => go(usize::MAX),
         KeyCode::Enter => app.detail = !app.detail,
         KeyCode::Char('/') => app.filtering = true,
-        KeyCode::Char('s') => app.sort = app.sort.next(),
+        KeyCode::Char('s') => {
+            app.sort = app.sort.next();
+            app.asc = app.sort.default_asc();
+        }
+        KeyCode::Char('r') => app.asc = !app.asc,
         KeyCode::Char('a') => app.show_all = !app.show_all,
-        KeyCode::Char('S') | KeyCode::Char('R') => {
+        KeyCode::Char(ch @ ('S' | 'R' | 'P' | 'K' | 'D')) => {
             let Some(c) = list.get(idx) else { return };
-            let action = match (k.code, c.is_running()) {
-                (KeyCode::Char('R'), _) => Action::Restart,
-                (_, true) => Action::Stop,
-                (_, false) => Action::Start,
+            let action = match (ch, c.state.as_str()) {
+                ('S', "running" | "paused" | "restarting") => Action::Stop,
+                ('S', _) => Action::Start,
+                ('R', _) => Action::Restart,
+                ('P', "paused") => Action::Unpause,
+                ('P', _) => Action::Pause,
+                ('K', _) => Action::Kill,
+                _ => Action::Remove,
             };
-            let (st, name, flash) = (state.clone(), c.name.clone(), app.flash.clone());
-            tokio::spawn(async move {
-                let msg = match container_action(&st, &name, action).await {
-                    Ok(()) => format!("{action:?} sent to {name}"),
-                    Err(e) => format!("{name}: {e:#}"),
-                };
-                *flash.lock().unwrap() = Some(msg);
-            });
+            if matches!(action, Action::Kill | Action::Remove) {
+                app.pending = Some(Pending {
+                    action,
+                    name: c.name.clone(),
+                });
+            } else {
+                spawn_action(state, app, c.name.clone(), action);
+            }
         }
         _ => {}
     }
@@ -259,7 +319,7 @@ fn on_key(k: KeyEvent, state: &Arc<AppState>, app: &mut App) {
 
 fn draw(f: &mut Frame, state: &Arc<AppState>, app: &mut App) {
     let [head, tabs, body, foot] = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(5),
         Constraint::Length(1),
         Constraint::Min(5),
         Constraint::Length(1),
@@ -327,9 +387,26 @@ fn draw_header(f: &mut Frame, area: Rect, state: &Arc<AppState>) {
         dock,
         Span::raw(format!("   containers {running}/{total} running")),
     ]);
+    // How hard ctopx is working Docker, so a slow daemon is never a mystery.
+    let p = state.poll.read().unwrap().clone();
+    let mut line3 = vec![Span::styled(
+        format!(
+            "docker api: poll every {:.1}s, {:.1} req/s, last poll {} ms",
+            p.interval_ms as f64 / 1000.0,
+            p.requests_per_sec,
+            p.cycle_ms
+        ),
+        Style::new().fg(Color::DarkGray),
+    )];
+    if p.throttle > 1 {
+        line3.push(Span::styled(
+            format!("   slowed x{} to protect Docker", p.throttle),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
     let name = state.cfg().instance_name();
     f.render_widget(
-        Paragraph::new(vec![Line::from(spans), line2])
+        Paragraph::new(vec![Line::from(spans), line2, Line::from(line3)])
             .block(Block::bordered().title(format!(" ctopx @ {name} "))),
         area,
     );
@@ -356,8 +433,27 @@ fn draw_containers(f: &mut Frame, area: Rect, state: &Arc<AppState>, app: &mut A
         (area, None)
     };
 
+    // The sorted column carries an arrow: ▲ ascending, ▼ descending.
+    let arrow = if app.asc { "▲" } else { "▼" };
+    let h = |label: &str, s: Sort| -> String {
+        if app.sort == s {
+            format!("{label} {arrow}")
+        } else {
+            label.to_string()
+        }
+    };
     let header = Row::new([
-        "", "NAME", "IMAGE", "CPU", "", "MEM", "MEM%", "NET RX", "NET TX", "PIDS", "STATUS",
+        String::new(),
+        h("NAME", Sort::Name),
+        "IMAGE".into(),
+        h("CPU", Sort::Cpu),
+        String::new(),
+        h("MEM USED / TOTAL", Sort::Mem),
+        "MEM%".into(),
+        h("NET RX", Sort::Net),
+        "NET TX".into(),
+        h("PIDS", Sort::Pids),
+        h("STATUS", Sort::State),
     ])
     .style(Style::new().add_modifier(Modifier::BOLD).fg(Color::Cyan));
     let rows: Vec<Row> = list
@@ -370,6 +466,7 @@ fn draw_containers(f: &mut Frame, area: Rect, state: &Arc<AppState>, app: &mut A
             } else {
                 Style::new().fg(Color::DarkGray)
             };
+            let dash = || "-".to_string();
             Row::new(vec![
                 Cell::from(Span::styled(icon, Style::new().fg(col))),
                 Cell::from(c.name.clone()),
@@ -378,7 +475,7 @@ fn draw_containers(f: &mut Frame, area: Rect, state: &Arc<AppState>, app: &mut A
                     if running {
                         format!("{:>5.1}%", c.cpu_percent)
                     } else {
-                        "-".into()
+                        dash()
                     },
                     Style::new().fg(level_color(c.cpu_percent)),
                 )),
@@ -390,34 +487,18 @@ fn draw_containers(f: &mut Frame, area: Rect, state: &Arc<AppState>, app: &mut A
                     },
                     Style::new().fg(level_color(c.cpu_percent)),
                 )),
-                Cell::from(if running {
-                    human_bytes(c.mem_bytes as f64)
-                } else {
-                    "-".into()
-                }),
+                Cell::from(if running { mem_pair(c) } else { dash() }),
                 Cell::from(Span::styled(
                     if running {
                         format!("{:>5.1}%", c.mem_percent)
                     } else {
-                        "-".into()
+                        dash()
                     },
                     Style::new().fg(level_color(c.mem_percent)),
                 )),
-                Cell::from(if running {
-                    rate(c.net_rx_bps)
-                } else {
-                    "-".into()
-                }),
-                Cell::from(if running {
-                    rate(c.net_tx_bps)
-                } else {
-                    "-".into()
-                }),
-                Cell::from(if running {
-                    c.pids.to_string()
-                } else {
-                    "-".into()
-                }),
+                Cell::from(if running { rate(c.net_rx_bps) } else { dash() }),
+                Cell::from(if running { rate(c.net_tx_bps) } else { dash() }),
+                Cell::from(if running { c.pids.to_string() } else { dash() }),
                 Cell::from(c.status.clone()),
             ])
             .style(dim)
@@ -425,22 +506,23 @@ fn draw_containers(f: &mut Frame, area: Rect, state: &Arc<AppState>, app: &mut A
         .collect();
     let widths = [
         Constraint::Length(2),
-        Constraint::Length(24),
         Constraint::Length(22),
-        Constraint::Length(7),
+        Constraint::Length(20),
+        Constraint::Length(8),
         Constraint::Length(9),
-        Constraint::Length(10),
+        Constraint::Length(26),
         Constraint::Length(7),
+        Constraint::Length(12),
         Constraint::Length(11),
-        Constraint::Length(11),
-        Constraint::Length(5),
+        Constraint::Length(7),
         Constraint::Min(10),
     ];
     let title = format!(
-        " containers ({}) sort: {} {}",
+        " containers ({}) sorted by {} {} {}",
         list.len(),
         app.sort.label(),
-        if app.show_all { "" } else { "running only " }
+        arrow,
+        if app.show_all { "" } else { "(running only) " }
     );
     let table = Table::new(rows, widths)
         .header(header)
@@ -490,15 +572,7 @@ fn draw_detail(f: &mut Frame, area: Rect, c: &ContainerView) {
                 .unwrap_or_default()
         )),
         Line::from(format!("status  {}", c.status)),
-        Line::from(format!(
-            "memory  {} of {}",
-            human_bytes(c.mem_bytes as f64),
-            if c.mem_limit > 0 {
-                human_bytes(c.mem_limit as f64)
-            } else {
-                "no limit".into()
-            }
-        )),
+        Line::from(format!("memory  {} ({:.1}%)", mem_pair(c), c.mem_percent)),
         Line::from(format!(
             "disk io {} read, {} write",
             rate(c.blk_read_bps),
@@ -684,7 +758,17 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &mut App) {
     {
         app.message = None;
     }
-    let line = if app.filtering {
+    let line = if let Some(p) = &app.pending {
+        let what = if p.action == Action::Kill {
+            "Kill (SIGKILL)"
+        } else {
+            "Remove"
+        };
+        Line::from(Span::styled(
+            format!("{what} {}?  y = yes, any other key = cancel", p.name),
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))
+    } else if app.filtering {
         Line::from(vec![
             Span::styled("filter: ", Style::new().fg(Color::Yellow)),
             Span::raw(format!("{}_", app.filter)),
@@ -700,7 +784,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &mut App) {
         };
         Line::from(Span::styled(
             format!(
-                "↑↓ select  Enter details  / filter  s sort  a stopped  S start/stop  R restart  Tab view  q quit{f2}"
+                "↑↓ select  Enter details  / filter  s sort field  r reverse  a stopped  S start/stop  R restart  P pause  K kill  D remove  Tab view  q quit{f2}"
             ),
             Style::new().fg(Color::DarkGray),
         ))
