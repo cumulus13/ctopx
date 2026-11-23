@@ -1,6 +1,6 @@
 [package]
 name = "ctopx"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 rust-version = "1.85"
 description = "ctop-style container monitor with alert notifications (ntfy, Telegram, GNTP, webhook), REST API and web UI"

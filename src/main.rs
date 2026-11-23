@@ -71,6 +71,11 @@ enum Cmd {
 }
 
 fn main() {
+    let args: Vec<String> = std::end::args().collect();
+    if args.len() == 2 && (args[1] == "-V" || args[1] == "--version") {
+        let version = colorful_version!();
+        version.print_and_exit();
+    }
     if let Err(e) = real_main() {
         eprintln!("error: {e:#}");
         std::process::exit(1);
@@ -78,11 +83,6 @@ fn main() {
 }
 
 fn real_main() -> Result<()> {
-    let args: Vec<String> = std::end::args().collect();
-    if args.len() == 2 && (args[1] == "-V" || args[1] == "--version") {
-        let version = colorful_version!();
-        version.print_and_exit();
-    }
     let cli = Cli::parse();
     if let Some(Cmd::Init { path, force }) = &cli.cmd {
         if path.exists() && !force {
