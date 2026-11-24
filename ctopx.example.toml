@@ -11,6 +11,7 @@ allow_actions = false        # allow start/stop/restart/pause/kill/remove from t
 # public_url = "https://ctopx.example.com"   # adds an "open dashboard" link to notifications
 
 [docker]
+enabled = true                    # false: monitor only the host (CPU, memory, disk), no Docker needed (Termux)
 # host = "tcp://127.0.0.1:2375"   # overrides DOCKER_HOST; default: local socket / named pipe
 
 # How often Docker is polled. Every container needs one stats request per poll, so the load on
@@ -21,6 +22,12 @@ max_concurrency = 4               # simultaneous stats requests
 adaptive = true                   # slow down automatically (up to 16x) when Docker answers slowly
 include = ["*"]                   # container name globs (* and ?)
 exclude = []                      # e.g. ["*-tmp", "ci-*"]
+
+[network]
+# Extra trusted CA certificates (PEM) for notification channels, e.g. a self-hosted ntfy behind a
+# private CA. SSL_CERT_FILE is used when this is not set. Static musl and Android builds already
+# contain Mozilla's public roots, so this is only for private CAs.
+# ca_file = "/path/to/ca.pem"
 
 [host]
 enabled = true                    # also monitor the machine itself (CPU, memory, swap, disk, load)

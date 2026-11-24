@@ -5,6 +5,56 @@ on:
 permissions:
   contents: write
 jobs:
+  # Fully static musl binaries: Alpine, Termux (Android), minimal containers.
+  musl:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, name: x86_64-musl }
+          - { target: aarch64-unknown-linux-musl, name: aarch64-musl }
+          - { target: armv7-unknown-linux-musleabihf, name: armv7-musl }
+          - { target: arm-unknown-linux-musleabihf, name: armv6-musl }
+          - { target: i686-unknown-linux-musl, name: i686-musl }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: pip install ziglang cargo-zigbuild
+      - run: cargo zigbuild --release --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/ctopx dist/ctopx-${{ matrix.name }}
+          file dist/ctopx-${{ matrix.name }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
+  # Native Android (bionic) binaries, for people who prefer them over the musl ones in Termux.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-ndk
+      - run: cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 build --release
+      - name: Package
+        run: |
+          mkdir dist
+          cp target/aarch64-linux-android/release/ctopx dist/ctopx-aarch64-android
+          cp target/armv7-linux-androideabi/release/ctopx dist/ctopx-armv7-android
+          cp target/i686-linux-android/release/ctopx dist/ctopx-i686-android
+          cp target/x86_64-linux-android/release/ctopx dist/ctopx-x86_64-android
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
   build:
     strategy:
       matrix:

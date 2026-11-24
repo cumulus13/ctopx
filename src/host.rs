@@ -5,28 +5,41 @@ use sysinfo::{Disks, System};
 
 pub struct HostCollector {
     sys: System,
-    disks: Disks,
+    disks: Option<Disks>,
     cpu_hist: std::collections::VecDeque<f32>,
     mem_hist: std::collections::VecDeque<f32>,
 }
 
 impl HostCollector {
-    pub fn new() -> Self {
-        let mut sys = System::new().expect("sysinfo: cannot initialise system info");
+    /// None when the system refuses to be inspected (some Android builds restrict /proc).
+    pub fn new() -> Option<Self> {
+        let mut sys = match System::new() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("host metrics unavailable: cannot read system info: {e}");
+                return None;
+            }
+        };
         sys.refresh_cpu_usage();
         sys.refresh_memory();
-        Self {
+        // Disks can be unreadable on their own (Android); keep CPU and memory working.
+        let disks = Disks::new_with_refreshed_list()
+            .map_err(|e| tracing::warn!("cannot list disks, disk metrics will be empty: {e}"))
+            .ok();
+        Some(Self {
             sys,
-            disks: Disks::new_with_refreshed_list().expect("sysinfo: cannot list disks"),
+            disks,
             cpu_hist: Default::default(),
             mem_hist: Default::default(),
-        }
+        })
     }
 
     pub fn collect(&mut self) -> HostView {
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
-        self.disks.refresh(true);
+        if let Some(d) = self.disks.as_mut() {
+            d.refresh(true);
+        }
         let pct = |used: u64, total: u64| {
             if total > 0 {
                 used as f64 / total as f64 * 100.0
@@ -46,7 +59,7 @@ impl HostCollector {
 
         let mut seen = std::collections::HashSet::new();
         let mut disks = vec![];
-        for d in self.disks.iter() {
+        for d in self.disks.iter().flat_map(|d| d.iter()) {
             let fs = d.file_system().to_string_lossy().to_lowercase();
             if matches!(
                 fs.as_str(),

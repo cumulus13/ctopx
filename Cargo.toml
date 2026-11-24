@@ -6,7 +6,7 @@ authors = [
 repository = "https://github.com/cumulus13/ctopx"
 documentation = "https://docs.rs/ctopx"
 homepage = "https://github.com/cumulus13/ctopx"
-version = "0.1.13"
+version = "0.1.14"
 edition = "2024"
 rust-version = "1.85"
 description = "ctop-style container monitor with alert notifications (ntfy, Telegram, GNTP, webhook), REST API and web UI"
@@ -26,7 +26,7 @@ futures-util = "0.3.34"
 hex = "0.4.3"
 hmac = "0.13.0"
 ratatui = "0.30.2"
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls-no-provider"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["hickory-dns", "json", "rustls-no-provider"] }
 rust-embed = { version = "8.14.0", features = ["mime-guess"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -43,3 +43,6 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[target.'cfg(any(target_env = "musl", target_os = "android"))'.dependencies]
+webpki-roots = "1.0.12"

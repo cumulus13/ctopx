@@ -16,6 +16,8 @@ pub struct DockerStatus {
     pub up: bool,
     pub error: Option<String>,
     pub since: Instant,
+    /// `docker.enabled = false`: Docker is intentionally not monitored.
+    pub disabled: bool,
 }
 
 pub struct AppState {
@@ -66,6 +68,7 @@ impl AppState {
                 up: false,
                 error: Some("not connected yet".into()),
                 since: Instant::now(),
+                disabled: false,
             }),
             containers: RwLock::new(BTreeMap::new()),
             host: RwLock::new(None),

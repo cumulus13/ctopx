@@ -23,11 +23,7 @@ impl Notifier {
     pub fn new(cfg: &Config) -> Self {
         // reqwest is built without a bundled TLS provider; install ring once (a second call is a no-op).
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .user_agent(concat!("ctopx/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("http client");
+        let client = crate::net::build_client(cfg);
         Self {
             channels: cfg.channels.clone(),
             client,

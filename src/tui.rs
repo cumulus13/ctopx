@@ -353,9 +353,9 @@ fn draw(f: &mut Frame, state: &Arc<AppState>, app: &mut App) {
 }
 
 fn draw_header(f: &mut Frame, area: Rect, state: &Arc<AppState>) {
-    let (up, err) = {
+    let (up, err, off) = {
         let s = state.docker_status.read().unwrap();
-        (s.up, s.error.clone())
+        (s.up, s.error.clone(), s.disabled)
     };
     let host = state.host.read().unwrap().clone();
     let cs = state.containers.read().unwrap();
@@ -375,7 +375,12 @@ fn draw_header(f: &mut Frame, area: Rect, state: &Arc<AppState>) {
         }
         spans.push(Span::raw(format!("load {:.2}   ", h.load1)));
     }
-    let dock = if up {
+    let dock = if off {
+        Span::styled(
+            "● docker monitoring off (host only)",
+            Style::new().fg(Color::DarkGray),
+        )
+    } else if up {
         Span::styled("● docker up", Style::new().fg(Color::Green))
     } else {
         Span::styled(

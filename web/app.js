@@ -265,7 +265,7 @@ function refresh() {
 // ---------- containers page ----------
 function renderBanner() {
   const d = S.snap.docker;
-  $('#banner').innerHTML = d.up ? '' : `<div class="banner" role="alert"><b>Docker is not reachable.</b> ${esc(d.error || '')} Container data below is the last known state.</div>`;
+  $('#banner').innerHTML = d.up || d.disabled ? '' : `<div class="banner" role="alert"><b>Docker is not reachable.</b> ${esc(d.error || '')} Container data below is the last known state.</div>`;
   const cs = S.snap.containers;
   const p = S.snap.poll;
   let sub = `${cs.filter((c) => c.state === 'running').length} of ${cs.length} running`;
@@ -333,7 +333,7 @@ function renderRows() {
   const v = filtered();
   if (!v.length) {
     const none = S.snap.containers.length === 0;
-    rows.innerHTML = `<tr><td colspan="6"><div class="empty"><b>${none ? 'No containers found' : 'Nothing matches this filter'}</b>${none ? (S.snap.docker.up ? 'Start a container and it will show up here.' : 'Check that the Docker daemon is running and that ctopx can reach it.') : 'Clear the filter to see all containers.'}</div></td></tr>`;
+    rows.innerHTML = `<tr><td colspan="6"><div class="empty"><b>${none ? (S.snap.docker.disabled ? 'Docker monitoring is off' : 'No containers found') : 'Nothing matches this filter'}</b>${none ? (S.snap.docker.disabled ? 'This instance only watches the host. Set docker.enabled = true to see containers.' : S.snap.docker.up ? 'Start a container and it will show up here.' : 'Check that the Docker daemon is running and that ctopx can reach it.') : 'Clear the filter to see all containers.'}</div></td></tr>`;
     return;
   }
   rows.innerHTML = v.map((c) => {

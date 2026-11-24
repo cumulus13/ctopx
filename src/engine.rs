@@ -233,9 +233,9 @@ pub fn evaluate(state: &Arc<AppState>) {
     let containers: Vec<ContainerView> =
         state.containers.read().unwrap().values().cloned().collect();
     let host = state.host.read().unwrap().clone();
-    let (docker_up, docker_err) = {
+    let (docker_up, docker_err, docker_off) = {
         let s = state.docker_status.read().unwrap();
-        (s.up, s.error.clone())
+        (s.up, s.error.clone(), s.disabled)
     };
     let now = Instant::now();
     let mut out: Vec<Outgoing> = vec![];
@@ -337,18 +337,21 @@ pub fn evaluate(state: &Arc<AppState>) {
                 }
                 RuleKind::DockerDaemon { for_secs: f } => {
                     for_secs = *f;
-                    obs.push(Obs {
-                        subject: "docker".into(),
-                        cond: !docker_up,
-                        value: None,
-                        title: "Docker daemon unreachable".into(),
-                        msg: format!(
-                            "Cannot reach the Docker daemon: {}",
-                            docker_err.clone().unwrap_or_default()
-                        ),
-                        ok_title: "Docker daemon reachable again".into(),
-                        ok_msg: "The Docker daemon is responding again".into(),
-                    });
+                    // With docker.enabled = false there is no daemon to watch.
+                    if !docker_off {
+                        obs.push(Obs {
+                            subject: "docker".into(),
+                            cond: !docker_up,
+                            value: None,
+                            title: "Docker daemon unreachable".into(),
+                            msg: format!(
+                                "Cannot reach the Docker daemon: {}",
+                                docker_err.clone().unwrap_or_default()
+                            ),
+                            ok_title: "Docker daemon reachable again".into(),
+                            ok_msg: "The Docker daemon is responding again".into(),
+                        });
+                    }
                 }
                 RuleKind::RestartLoop {
                     restarts,

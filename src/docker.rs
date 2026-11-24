@@ -427,6 +427,7 @@ async fn poll_containers(
 
 fn set_status(state: &Arc<AppState>, up: bool, err: Option<String>) {
     let mut s = state.docker_status.write().unwrap();
+    s.disabled = false;
     if s.up != up {
         s.since = Instant::now();
         if up {
@@ -451,6 +452,9 @@ pub async fn run_collector(state: Arc<AppState>) {
     let mut prev: HashMap<String, Prev> = HashMap::new();
     let mut backoff: Backoff = HashMap::new();
     let mut host = crate::host::HostCollector::new();
+    if host.is_none() {
+        tracing::warn!("running without host metrics");
+    }
     let mut factor: u32 = 1;
     loop {
         let cfg = state.cfg();
@@ -467,16 +471,25 @@ pub async fn run_collector(state: Arc<AppState>) {
         let req_before = state.requests.load(std::sync::atomic::Ordering::Relaxed);
         let started = Instant::now();
         let mut polled = 0;
-        match poll_containers(&state, &mut prev, &mut backoff, live, every).await {
-            Ok(n) => {
-                polled = n;
-                set_status(&state, true, None)
+        if cfg.docker.enabled {
+            match poll_containers(&state, &mut prev, &mut backoff, live, every).await {
+                Ok(n) => {
+                    polled = n;
+                    set_status(&state, true, None)
+                }
+                Err(e) => set_status(&state, false, Some(format!("{e}"))),
             }
-            Err(e) => set_status(&state, false, Some(format!("{e}"))),
+        } else {
+            let mut s = state.docker_status.write().unwrap();
+            s.disabled = true;
+            s.up = false;
+            s.error = None;
+            state.containers.write().unwrap().clear();
         }
-        if cfg.host.enabled {
-            let view = host.collect();
-            *state.host.write().unwrap() = Some(view);
+        if cfg.host.enabled
+            && let Some(h) = host.as_mut()
+        {
+            *state.host.write().unwrap() = Some(h.collect());
         }
         engine::evaluate(&state);
         let spent = started.elapsed();
@@ -511,6 +524,10 @@ pub async fn run_collector(state: Arc<AppState>) {
 /// Streams Docker events, reconnecting forever.
 pub async fn run_events(state: Arc<AppState>) {
     loop {
+        if !state.cfg().docker.enabled {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            continue;
+        }
         let Ok(docker) = client(&state) else {
             tokio::time::sleep(Duration::from_secs(3)).await;
             continue;

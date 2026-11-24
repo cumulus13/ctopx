@@ -94,9 +94,9 @@ fn snapshot(state: &Arc<AppState>) -> Value {
     let containers: Vec<ContainerView> =
         state.containers.read().unwrap().values().cloned().collect();
     let host = state.host.read().unwrap().clone();
-    let (up, error) = {
+    let (up, error, disabled) = {
         let s = state.docker_status.read().unwrap();
-        (s.up, s.error.clone())
+        (s.up, s.error.clone(), s.disabled)
     };
     let alerts = state.engine.lock().unwrap().active_alerts();
     json!({
@@ -105,7 +105,7 @@ fn snapshot(state: &Arc<AppState>) -> Value {
         "version": env!("CARGO_PKG_VERSION"),
         "allow_actions": state.remote_actions_allowed(),
         "poll": state.poll.read().unwrap().clone(),
-        "docker": { "up": up, "error": error },
+        "docker": { "up": up, "error": error, "disabled": disabled },
         "host": host,
         "containers": containers,
         "alerts": alerts,

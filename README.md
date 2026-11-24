@@ -20,22 +20,50 @@ A `ctop`-style container monitor that also **tells you when something is wrong**
   </a>
 </p>
 
-
 It monitors Docker containers and the host machine itself (CPU, memory, swap, disk, load).
+
+## Install
+
+Release binaries are fully static (musl) and need nothing from the system, so they run on Alpine, Debian, Termux and anything else with a Linux kernel. Pick the one that matches `uname -m`:
+
+| `uname -m` | Binary | Typical use |
+|---|---|---|
+| `x86_64` | `ctopx-x86_64-musl` | Alpine, any 64-bit Linux, Termux on x86_64 |
+| `aarch64`, `arm64` | `ctopx-aarch64-musl` | Alpine, Raspberry Pi 3/4/5 (64-bit), most Android phones in Termux |
+| `armv7l`, `armv8l` | `ctopx-armv7-musl` | Alpine armv7, Termux on 32-bit ARM phones, Raspberry Pi 2/3 with a 32-bit OS |
+| `armv6l` | `ctopx-armv6-musl` | Alpine armhf, Raspberry Pi Zero / 1 |
+| `i686`, `i386` | `ctopx-i686-musl` | Alpine x86, Termux on i686 |
+
+```sh
+chmod +x ctopx-*-musl && ./ctopx-*-musl --help
+```
+
+Not sure which one? `file ctopx-*` should say "statically linked", and `uname -m` tells you the CPU. A glibc build (`cargo build --release` on a normal Linux/macOS/Windows host) will **not** run on Alpine: musl has no glibc symbols such as `__res_init`. Use the `-musl` files there.
+
+### Termux (Android)
+
+Docker normally does not run inside Termux, so you have two sensible setups:
+
+```sh
+# 1. Watch a remote Docker host from your phone. Use an IP address in DOCKER_HOST.
+DOCKER_HOST=tcp://192.168.1.10:2375 ./ctopx-aarch64-musl
+
+# 2. No Docker at all: watch the phone itself and get notifications.
+#    Put this in ctopx.toml:   [docker]  enabled = false
+./ctopx-aarch64-musl serve
+```
+
+Things that differ on Android, and what ctopx does about them:
+
+- **DNS.** The static musl resolver needs `/etc/resolv.conf`, which Android does not have. When it is missing, notification channels use a built-in resolver that falls back to public DNS servers, and ctopx logs a warning saying so. `DOCKER_HOST` and GNTP hosts go through the normal system resolver, so use IP addresses there.
+- **Certificates.** Mozilla's root certificates are built into the static binaries, so HTTPS to ntfy.sh, Telegram and similar works without a system CA bundle. For a private CA set `network.ca_file` or `SSL_CERT_FILE`.
+- **Restricted `/proc`.** Recent Android versions hide parts of `/proc` from apps. If host metrics cannot be read, ctopx logs it and keeps running without them instead of crashing.
+- **Config location.** `~/.config/ctopx/ctopx.toml` works, as does `ctopx init` in the current directory.
 
 ## Quick start
 
 ```sh
-cargo install ctopx
-```
-
-or 
-
-```sh
 cargo build --release          # produces target/release/ctopx (ctopx.exe on Windows)
-```
-
-```sh
 ctopx init                     # writes ./ctopx.toml with every option documented
 ctopx check                    # validates the config and lists the rules in effect
 ctopx test-notify              # sends a test message to every channel
@@ -220,6 +248,8 @@ While a UI is open the rate is roughly `running containers / interval_secs`, for
 
 - Alert history, events and silences live in memory and are lost on restart. Rules and channels live in the config file and cannot be edited from the UI.
 - GNTP is sent unencrypted (`NONE`) with optional SHA256 password authentication; multi-line text is flattened to one line.
+- Developed and tested on Linux (glibc and musl, x86_64). The aarch64, armv7, armv6 and i686 musl builds were run under QEMU user-mode emulation, not on real devices.
+- Termux: the DNS fallback and the restricted-`/proc` handling were exercised by simulating a missing `/etc`, not on a real Android device.
 - Developed and tested on Linux. The Windows code paths (Docker named pipe, Windows containers' CPU accounting) use the same libraries but have not been run on Windows yet.
 - Only Docker is supported (not Podman-specific, Kubernetes or Swarm views).
 - A container's notification for an OOM kill and for the crash that follows share one cooldown, so you get one message, not two.

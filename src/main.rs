@@ -3,6 +3,7 @@ mod docker;
 mod engine;
 mod host;
 mod model;
+mod net;
 mod notify;
 mod state;
 mod tui;
@@ -147,19 +148,22 @@ fn real_main() -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let state = state::AppState::new(cfg, cfg_path, None);
-
-    match cli.cmd.unwrap_or(Cmd::Tui {
+    let cmd = cli.cmd.unwrap_or(Cmd::Tui {
         serve: false,
         bind: None,
         allow_actions: false,
         read_only: false,
-    }) {
+    });
+    // Logging first, so startup warnings (DNS fallback, CA files) are not lost. The TUI owns the
+    // terminal, so it logs to a file instead.
+    init_logging(matches!(cmd, Cmd::Tui { .. }));
+    let state = state::AppState::new(cfg, cfg_path, None);
+
+    match cmd {
         Cmd::Serve {
             bind,
             allow_actions,
         } => {
-            init_logging(false);
             state
                 .actions_forced
                 .store(allow_actions, std::sync::atomic::Ordering::Relaxed);
@@ -178,7 +182,6 @@ fn real_main() -> Result<()> {
             allow_actions,
             read_only,
         } => {
-            init_logging(true);
             state
                 .actions_forced
                 .store(allow_actions, std::sync::atomic::Ordering::Relaxed);

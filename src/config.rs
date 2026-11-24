@@ -21,6 +21,7 @@ fn warning() -> Severity {
 pub struct Config {
     pub server: ServerCfg,
     pub docker: DockerCfg,
+    pub network: NetworkCfg,
     pub host: HostCfg,
     pub alerts: AlertsCfg,
     pub channels: Vec<ChannelCfg>,
@@ -53,6 +54,9 @@ impl Default for ServerCfg {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct DockerCfg {
+    /// Set to false to monitor only the host (CPU, memory, disk) without a Docker daemon,
+    /// for example on Termux. Docker rules and the daemon-down alert are then skipped.
+    pub enabled: bool,
     /// Overrides DOCKER_HOST (tcp://..., unix://..., npipe://...).
     pub host: Option<String>,
     /// Poll interval while a UI (web, TUI) is open.
@@ -69,6 +73,7 @@ pub struct DockerCfg {
 impl Default for DockerCfg {
     fn default() -> Self {
         Self {
+            enabled: true,
             host: None,
             interval_secs: 2,
             idle_interval_secs: 10,
@@ -78,6 +83,14 @@ impl Default for DockerCfg {
             exclude: vec![],
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct NetworkCfg {
+    /// Extra trusted CA certificates (PEM) for notification channels, for example a corporate
+    /// or self-hosted CA. `SSL_CERT_FILE` is honoured too when this is not set.
+    pub ca_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
